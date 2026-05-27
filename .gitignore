@@ -1,0 +1,7 @@
+ResNet18_poultry_disease.pth
+resnet18_poultry_diseases.pth
+__pycache__/
+*.pyc
+.venv/
+venv/
+.Rhistory
