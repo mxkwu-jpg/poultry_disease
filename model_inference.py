@@ -50,6 +50,29 @@ class ModelWeightsError(RuntimeError):
     """Raised when the poultry ResNet18 weights file is missing or invalid."""
 
 
+def _validate_weights_file(path: Path) -> None:
+    """
+    Validate the model file before torch.load().
+    This catches common deployment issues (text/LFS pointer/corrupt upload).
+    """
+    size = path.stat().st_size
+    if size < 1024:
+        raise ModelWeightsError(
+            f"`{path.name}` looks too small ({size} bytes). "
+            "Expected a binary PyTorch state_dict file."
+        )
+
+    header = path.read_bytes()[:16]
+    # torch save commonly starts with ZIP header (PK...) or pickle protocol bytes.
+    valid_binary = header.startswith(b"PK") or header.startswith(b"\x80")
+    if not valid_binary:
+        hex_head = header.hex()
+        raise ModelWeightsError(
+            f"`{path.name}` is not a valid PyTorch binary header (first bytes: {hex_head}). "
+            "Re-upload the file in binary mode and ensure no line-ending/text conversion."
+        )
+
+
 def model_weights_path(base_dir: Path | None = None) -> Path:
     root = base_dir or Path(__file__).resolve().parent
     return root / MODEL_FILENAME
@@ -71,6 +94,7 @@ def load_poultry_resnet18(base_dir: Path | None = None) -> nn.Module:
             f"Required weights file not found: {path}\n"
             f"Place `{MODEL_FILENAME}` in the app folder."
         )
+    _validate_weights_file(path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_resnet18()
@@ -85,8 +109,14 @@ def load_poultry_resnet18(base_dir: Path | None = None) -> nn.Module:
         load_mode = "weights_only=False (torch compatibility fallback)"
     except Exception:
         # Some older .pth files are not compatible with weights_only=True.
-        state_dict = torch.load(path, map_location=device, weights_only=False)
-        load_mode = "weights_only=False (legacy file fallback)"
+        try:
+            state_dict = torch.load(path, map_location=device, weights_only=False)
+            load_mode = "weights_only=False (legacy file fallback)"
+        except Exception as exc:
+            raise ModelWeightsError(
+                f"Failed to load `{path.name}` as a PyTorch state_dict: {exc}. "
+                "This usually means the deployed file is corrupted or was transferred as text."
+            ) from exc
 
     # If this is a training checkpoint, extract the actual model weights.
     if isinstance(state_dict, dict) and "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
